@@ -19,6 +19,7 @@ from pathlib import Path
 
 from utils.spline_fit import fit_centerline_spline
 from utils.capsule_collision import check_capsule_splines_collision
+from utils.object_frame import candidate_pushes_in_camera_frame
 
 matplotlib.use("TkAgg")  # interactive window; change to "Agg" to save instead
 
@@ -159,18 +160,20 @@ def load_version(v):
     # current (start) tissue surface (~4-11 mm) and pred_end on the goal tissue
     # surface (~4-6 mm) -- i.e. the tip interacting with the two clouds.
     #
-    # NOTE: d["preds"][...] (start_point/displacement and their normalized_*
-    # twins) is the 500-sample candidate set in a NORMALIZED, object-centered,
-    # *rotated* frame -- centered near the origin (z~0) and with displacements
-    # rotated ~120-180 deg from the camera frame (cos to pred_disp ~ -0.6..-0.8).
-    # It does NOT overlay the camera-frame clouds, so we don't plot it. Placing
-    # it would need the object->camera transform used at inference, which is not
-    # stored in this pickle (the table plane alone is not enough).
+    # d["preds"][...] (start_point/displacement) is the 500-sample candidate set
+    # in DiffDef's OBJECT frame (PCA-aligned, origin-centered), so it does not
+    # overlay the camera-frame clouds as stored. utils.object_frame reconstructs
+    # the object->camera transform from the start cloud and maps the candidates
+    # back into the camera frame (validated: the chosen push round-trips onto
+    # its candidate to <1.5 mm). cand_starts/cand_ends are then camera-frame.
+    cand_starts, cand_ends = candidate_pushes_in_camera_frame(d)
     return {
         "start_pc": d["camera_frame_current_pc"].astype(np.float32),
         "goal_pc": d["camera_frame_goal_pc"].astype(np.float32),
         "push_start": np.asarray(d["pred_start"]).ravel(),
         "push_end": np.asarray(d["pred_end"]).ravel(),
+        "cand_starts": cand_starts,
+        "cand_ends": cand_ends,
         "obstacle_pc": np.load(DATA_DIR / f"obstacle_pc_v{v}.npy"),
         "image": plt.imread(DATA_DIR / f"image_v{v}.png"),
         "plane": plane_coeffs(d["table_plane_equation"]),
@@ -223,6 +226,16 @@ def plot_version(data, fig, col, ncols, title):
                             edgecolor="saddlebrown", linewidths=1.0)
     ax3d.add_collection3d(quad)
 
+    # draw the 500 candidate pushes (preds), mapped from DiffDef's object frame
+    # into this camera frame, as faint start->end segments: the predicted action
+    # distribution the chosen push was selected from.
+    cand_s = data["cand_starts"]
+    cand_e = data["cand_ends"]
+    for i, (cs, ce) in enumerate(zip(cand_s, cand_e)):
+        ax3d.plot(*np.vstack([cs, ce]).T, "-", color="crimson", linewidth=0.5,
+                  alpha=0.12, label="Candidate pushes" if i == 0 else None)
+    ax3d.scatter(*cand_s.T, s=2, c="crimson", alpha=0.3)
+
     # draw the chosen push (camera frame) as the capsule swept by the robot
     # tip (sphere of ROBOT_TIP_RADIUS) moving from the current tissue to the
     # goal tissue. Collision-check that capsule against the artery tube.
@@ -248,7 +261,8 @@ def plot_version(data, fig, col, ncols, title):
               label=f"Push capsule ({status}, {clearance_mm:+.1f} mm)")
 
     # equal aspect: center a cube on the data so nothing gets flattened
-    bounds = np.vstack([scene, corners, push_s[None], push_e[None], *spline_pts])
+    bounds = np.vstack([scene, corners, push_s[None], push_e[None],
+                        cand_s, cand_e, *spline_pts])
     center = (bounds.max(axis=0) + bounds.min(axis=0)) / 2
     half = (bounds.max(axis=0) - bounds.min(axis=0)).max() / 2
     ax3d.set_xlim(center[0] - half, center[0] + half)
@@ -273,25 +287,30 @@ def plot_version(data, fig, col, ncols, title):
     return ax3d
 
 
-versions = [int(a) for a in sys.argv[1:]] if len(sys.argv) > 1 else [1]
-ncols = len(versions)
+def main(versions):
+    ncols = len(versions)
 
-np.random.seed(0)
-fig = plt.figure(figsize=(6 * ncols, 10))
-fig.suptitle("PushVIBES — start (blue) / goal (orange) / artery (green) / pushes (red)",
-             fontsize=11)
+    np.random.seed(0)
+    fig = plt.figure(figsize=(6 * ncols, 10))
+    fig.suptitle("PushVIBES — start (blue) / goal (orange) / artery (green) / pushes (red)",
+                 fontsize=11)
 
-push_axes = []
-for col, v in enumerate(versions, start=1):
-    print(f"Loading version {v}...")
-    data = load_version(v)
-    push_axes.append(plot_version(data, fig, col, ncols, f"Version {v}"))
+    push_axes = []
+    for col, v in enumerate(versions, start=1):
+        print(f"Loading version {v}...")
+        data = load_version(v)
+        push_axes.append(plot_version(data, fig, col, ncols, f"Version {v}"))
 
-# shared heat-map colorbar for the push capsule's signed surface clearance
-sm = cm.ScalarMappable(norm=CLEARANCE_NORM, cmap=CLEARANCE_CMAP)
-sm.set_array([])
-cbar = fig.colorbar(sm, ax=push_axes, fraction=0.02, pad=0.04)
-cbar.set_label("Push surface clearance (mm)\n← penetration   |   clearance →")
+    # shared heat-map colorbar for the push capsule's signed surface clearance
+    sm = cm.ScalarMappable(norm=CLEARANCE_NORM, cmap=CLEARANCE_CMAP)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=push_axes, fraction=0.02, pad=0.04)
+    cbar.set_label("Push surface clearance (mm)\n← penetration   |   clearance →")
 
-plt.tight_layout()
-plt.show()
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == "__main__":
+    versions = [int(a) for a in sys.argv[1:]] if len(sys.argv) > 1 else [1]
+    main(versions)
