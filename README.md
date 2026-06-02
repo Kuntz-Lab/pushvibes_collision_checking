@@ -44,16 +44,20 @@ available, otherwise CPU). Everything else runs on CPU.
 ## Repository layout
 
 ```
-visualize.py              # chosen push + candidate fan + per-push collision status
-visualize_ranked.py       # rank all candidates, draw N safest vs N riskiest
+visualize.py                       # chosen push + candidate fan + per-push collision status
+visualize_ranked.py                # rank all candidates (deterministic), N safest vs N riskiest
+visualize_ranked_probabilistic.py  # rank all candidates by collision probability, N safest vs N riskiest
 utils/
-  object_frame.py         # object-frame <-> camera-frame transform for the pushes
-  spline_fit.py           # artery point cloud -> ordered centerline -> B-spline
-  capsule_collision.py    # single capsule-vs-tube distance/collision (reference loop)
-  collision_ranking.py    # batched (GPU) capsule-vs-tube scoring & ranking
-  extract_rosbag_data.py  # rebuild obstacle_pc / tissue_pc / image from the rosbags
-  inspect_data.py         # print the structure of the pickle files
-data/                     # input data (git-ignored), see below
+  object_frame.py                       # object-frame <-> camera-frame transform for the pushes
+  spline_fit.py                         # artery point cloud -> ordered centerline -> B-spline
+  deterministic_capsule_collision.py    # single capsule-vs-tube distance/collision (reference loop)
+  deterministic_collision_ranking.py    # batched (GPU) capsule-vs-tube scoring & ranking
+  probabilistic_collision.py            # collision-probability scoring (scipy reference loop, Alg. 2)
+  probabilistic_collision_ranking.py    # batched (GPU) collision-probability scoring & ranking
+  probabilistic_spline.py               # artery point cloud -> Gaussian B-spline (mu_w, Sigma_w, Phi)
+  extract_rosbag_data.py                # rebuild obstacle_pc / tissue_pc / image from the rosbags
+  inspect_data.py                       # print the structure of the pickle files
+data/                                   # input data (git-ignored), see below
 ```
 
 ## Data structure
@@ -136,10 +140,54 @@ the chosen push round-trips onto its matching candidate to < 1.5 mm. Use
    push it forms a capsule. The artery is a tube of `SPLINE_RADIUS` (= the Mean Shift
    `ARTERY_BANDWIDTH`) around the spline. Signed clearance = (closest core distance) −
    (capsule radius + tube radius).
-3. **Scoring**: `utils/capsule_collision.py` is the readable per-push reference;
-   `utils/collision_ranking.py` is the batched/GPU equivalent that scores all 500
-   candidates at once. Both compute the same signed clearance (cross-checked in the
-   module `__main__` self-tests).
+3. **Scoring**: `utils/deterministic_capsule_collision.py` is the readable per-push
+   reference; `utils/deterministic_collision_ranking.py` is the batched/GPU equivalent
+   that scores all 500 candidates at once. Both compute the same signed clearance
+   (cross-checked in the module `__main__` self-tests).
+
+## Probabilistic collision avoidance (Section 3 / Algorithm 2)
+
+The deterministic ranking assumes the artery is exactly where the spline fit places it.
+The probabilistic pipeline instead puts a Gaussian `w ~ N(mu_w, Sigma_w)` on the
+B-spline control points and scores each push by its joint probability of clearing the
+artery across `M` waypoints, accounting for the fit uncertainty.
+
+- `utils/probabilistic_spline.py` fits the artery as a **Gaussian B-spline**: an explicit
+  ridge B-spline regression on the ordered centerline nodes yields the control-point mean
+  `mu_w`, the ridge-posterior covariance `Sigma_w = alpha (BᵀB + lambda·R)^-1`, and the
+  per-waypoint basis matrices `Phi`. The covariance *scale* is taken from the obstacle
+  **point cloud's** scatter about the mean curve (the MeanShift nodes are denoised, so
+  their own residual collapses the covariance to ~0); `A^-1`'s shape then inflates the
+  uncertainty where the basis support is sparse and out along the extrapolated (obscured)
+  continuation. `splprep`/`spline_fit.py` are left untouched.
+- `utils/probabilistic_collision.py` is the readable per-push reference: it projects the
+  parameter uncertainty to each waypoint (`mu_t = Phi_t mu_w`, `Sigma_t = Phi_t Sigma_w
+  Phi_tᵀ`), whitens via Cholesky, and evaluates the non-central chi-squared survival
+  `P(D² > d²)` (df=3, non-centrality = squared Mahalanobis offset), multiplying the
+  per-waypoint clearance probabilities into a joint safety probability.
+- `utils/probabilistic_collision_ranking.py` is the batched/GPU equivalent: it vectorizes
+  the projection, batched eigendecomposition/Cholesky/whitening, and a torch
+  implementation of the non-central chi-squared CDF (a Poisson-weighted incomplete-gamma
+  series), scoring all candidates at once. Cross-checked against the scipy reference and
+  `scipy.stats.ncx2` in its `__main__`.
+
+```bash
+python visualize_ranked_probabilistic.py 1 2 3   # rank candidates by collision probability
+```
+
+**Waypoint pairing.** Each push waypoint must be paired with a point on the spline.
+`utils.probabilistic_spline.discretize_candidates` offers two schemes:
+
+- `"nearest"` (**default**): pair each push waypoint with its *closest* point on the
+  spline — the same centerline-to-centerline geometry the deterministic ranker uses. This
+  is what makes the probabilistic ranking discriminate and track the deterministic one.
+- `"index"`: the literal Algorithm 2 pairing (push waypoint `t` ↔ spline parameter `u_t`
+  by index, `Phi` shared across candidates). Kept for paper fidelity, but on this data the
+  corresponding-index points are far apart, so every push scores ~1.0 (no discrimination).
+
+The batched ranker (`collision_probabilities`) accepts either a shared `(M, 3, 3K)` `Phi`
+(index pairing) or a per-candidate `(N, M, 3, 3K)` `Phi` (nearest pairing) and vectorizes
+both. Set `PAIRING` at the top of `visualize_ranked_probabilistic.py` to switch.
 
 Tuning constants live at the top of `visualize.py` (`ARTERY_BANDWIDTH`,
 `ARTERY_SMOOTHING`, `ARTERY_EXTRAPOLATE`, `ROBOT_TIP_RADIUS`, `SPLINE_RADIUS`, and the

@@ -18,7 +18,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from pathlib import Path
 
 from utils.spline_fit import fit_centerline_spline
-from utils.capsule_collision import check_capsule_splines_collision
+from utils.deterministic_capsule_collision import check_capsule_splines_collision
 from utils.object_frame import candidate_pushes_in_camera_frame
 
 matplotlib.use("TkAgg")  # interactive window; change to "Agg" to save instead

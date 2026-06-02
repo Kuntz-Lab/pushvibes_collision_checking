@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collision checking between a swept-sphere capsule and a tube-shaped spline.
+"""Deterministic collision checking: a swept-sphere capsule vs a tube-shaped spline.
 
 The robot tip is approximated as a sphere of radius R; as it travels linearly
 along a push it sweeps out a capsule (cylinder + two hemispherical caps). The

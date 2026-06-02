@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batched, GPU-friendly collision scoring & ranking of candidate pushes.
+"""Deterministic batched, GPU-friendly collision scoring & ranking of candidate pushes.
 
 Each candidate push is the capsule swept by the robot tip (a sphere of
 ``capsule_radius``) travelling linearly from its start to its end point. The
@@ -164,7 +164,7 @@ def rank_trajectories(cand_starts, cand_ends, capsule_radius,
 
 if __name__ == "__main__":
     # Cross-check the batched scores against the per-capsule reference loop.
-    from capsule_collision import check_capsule_splines_collision
+    from deterministic_capsule_collision import check_capsule_splines_collision
 
     rng = np.random.default_rng(0)
     t = np.linspace(0, 10, 40)

@@ -29,7 +29,7 @@ from visualize import (
     CLEARANCE_CMAP, CLEARANCE_NORM,
 )
 from utils.spline_fit import fit_centerline_spline
-from utils.collision_ranking import rank_trajectories
+from utils.deterministic_collision_ranking import rank_trajectories
 
 N_BEST = 5   # safest pushes to draw (highest clearance)
 N_WORST = 5  # riskiest pushes to draw (lowest clearance / deepest penetration)
